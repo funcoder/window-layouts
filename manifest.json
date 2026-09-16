@@ -1,0 +1,67 @@
+{
+  "schemaVersion": 1,
+  "id": "funcoder.window-layouts",
+  "name": "Window Layouts",
+  "version": "0.1.0",
+  "author": "funcoder",
+  "license": "MIT",
+  "description": "Save every open window across all workspaces as a named template, then restore it in one click: relaunches missing apps, moves existing windows back into place and rebuilds each workspace's tiling.",
+  "keywords": ["windows", "layout", "session", "restore", "workspaces", "template"],
+  "kinds": ["bar-widget"],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Window Layouts",
+    "description": "Save and restore window layouts across all workspaces",
+    "category": "Productivity",
+    "aliases": ["layouts", "session", "workspaces", "templates", "restore"],
+    "allowMultiple": false,
+    "defaultSection": "left",
+    "defaults": {
+      "closeOthers": true,
+      "launchTimeout": 45,
+      "autosave": true,
+      "autosaveMinutes": 5,
+      "startupTemplate": ""
+    },
+    "schema": [
+      {
+        "key": "closeOthers",
+        "type": "boolean",
+        "label": "Close windows that are not part of the template",
+        "defaultValue": true
+      },
+      {
+        "key": "launchTimeout",
+        "type": "integer",
+        "label": "Seconds to wait for launched apps",
+        "min": 5,
+        "max": 180,
+        "step": 5,
+        "defaultValue": 45
+      },
+      {
+        "key": "autosave",
+        "type": "boolean",
+        "label": "Keep a \"Last session\" snapshot for restoring after a reboot",
+        "defaultValue": true
+      },
+      {
+        "key": "autosaveMinutes",
+        "type": "integer",
+        "label": "Snapshot interval (minutes)",
+        "min": 1,
+        "max": 60,
+        "step": 1,
+        "defaultValue": 5
+      },
+      {
+        "key": "startupTemplate",
+        "type": "string",
+        "label": "Restore this template automatically at login (blank = off)",
+        "defaultValue": ""
+      }
+    ]
+  }
+}
