@@ -20,16 +20,28 @@ named template and restores it in one click.
 The panel follows the active Omarchy theme: it uses the shell's own panel, row,
 button and confirm-dialog components, fonts and colors.
 
+## Requirements
+
+- [Omarchy](https://omarchy.org) 4 (the Quickshell-based shell with plugins) on
+  Hyprland. Python 3 is included with Omarchy. There are no other dependencies.
+
 ## Install
 
-```bash
-./deploy-local.sh                              # copy into ~/.config/omarchy/plugins and validate
+```sh
+omarchy plugin add https://github.com/funcoder/window-layouts.git
 omarchy plugin enable funcoder.window-layouts left
 ```
 
-Re-run `./deploy-local.sh` after editing. Changes to `layouts.py` apply
-immediately. The shell's hot-reload can keep a stale compiled `Panel.qml`, so
-after changing the QML run `omarchy restart shell`.
+Update with `omarchy plugin update funcoder.window-layouts`.
+
+## Remove
+
+```sh
+omarchy plugin remove funcoder.window-layouts
+rm -rf ~/.config/omarchy/window-layouts ~/.local/state/omarchy/window-layouts   # optional: saved templates and snapshots
+```
+
+Also delete any key bindings you added for it from `~/.config/hypr/bindings.lua`.
 
 ## Settings
 
@@ -97,3 +109,10 @@ How launch commands are worked out:
 - Apps that restore their own windows (e.g. a browser reopening a session) can
   open extra windows. Those are left alone.
 - A window that asks before closing (unsaved work) stays open.
+
+## Development
+
+`./deploy-local.sh` copies a checkout into `~/.config/omarchy/plugins` and
+validates it. Re-run it after editing. Changes to `layouts.py` apply
+immediately. The shell's hot-reload can keep a stale compiled `Panel.qml`, so
+after changing the QML run `omarchy restart shell`.
