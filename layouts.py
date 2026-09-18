@@ -41,6 +41,7 @@ import re
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -72,6 +73,29 @@ TERMINAL_COMMAND_FLAG = {"foot": [], "kitty": [], "alacritty": ["-e"], "ghostty"
 COMMAND_MIN_AGE = 20
 # Set from --no-commands: record terminals as a bare shell instead.
 CAPTURE_COMMANDS = True
+# A command line can carry a password or token as an argument. Templates are
+# ordinary files that live on for months, so a command that looks like it
+# carries a credential is never written down at all.
+SECRET_FLAG = re.compile(
+    r"^--?[A-Za-z0-9_\-]*(?:password|passwd|token|api[-_]?key|apikey|secret|auth|bearer|credential|"
+    r"access[-_]?key|private[-_]?key|session[-_]?key|passphrase|pat)[A-Za-z0-9_\-]*$", re.I)
+SECRET_ASSIGN = re.compile(
+    r"^--?[A-Za-z0-9_\-]*(?:password|passwd|token|api[-_]?key|apikey|secret|auth|bearer|credential|"
+    r"access[-_]?key|private[-_]?key|session[-_]?key|passphrase)[A-Za-z0-9_\-]*=", re.I)
+SECRET_IN_URL = re.compile(
+    r"[?&#](?:password|passwd|token|access[-_]?token|id[-_]?token|api[-_]?key|apikey|secret|auth|"
+    r"code|key|sig|signature)=[^&\s]", re.I)
+SECRET_SHAPED = re.compile(
+    r"(?:sk-[A-Za-z0-9_\-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|xox[baprse]-[A-Za-z0-9\-]{10,}|"
+    r"AKIA[0-9A-Z]{12,}|eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.|://[^/\s:@]+:[^/\s@]+@)")
+
+# Ceilings on anything read back off disk, so a tampered or corrupt template
+# can't drive the restore into a huge or endless job.
+MAX_TEMPLATE_BYTES = 4 * 1024 * 1024
+MAX_WINDOWS = 120
+MAX_ARGV = 64
+MAX_ARG_CHARS = 4096
+MAX_FIELD_CHARS = 1024
 WEBAPP_CLASS = re.compile(r"^(chrome|brave|msedge|vivaldi|helium)-(.+)-([^-]+)$")
 
 
@@ -459,6 +483,25 @@ def strip_flag(argv, long_flag, short_flag=None):
     return out
 
 
+def secret_bearing(argv):
+    """True when a command line looks like it carries a credential."""
+    previous = ""
+    for raw in argv:
+        arg = str(raw)
+        if SECRET_ASSIGN.match(arg) or SECRET_IN_URL.search(arg) or SECRET_SHAPED.search(arg):
+            return True
+        # "--token abc123": the flag is on the previous argument.
+        if SECRET_FLAG.match(previous) and not arg.startswith("-"):
+            return True
+        previous = arg
+    return False
+
+
+def recordable(argv):
+    """A command is only written to a template when it holds no credentials."""
+    return bool(argv) and not secret_bearing(argv)
+
+
 def terminal_command(shell_pid):
     """The command running in a terminal, or (None, None) for a bare prompt.
 
@@ -484,6 +527,9 @@ def terminal_command(shell_pid):
             continue
         if process_age(kid) < COMMAND_MIN_AGE:
             continue
+        if not recordable(argv):
+            # Restores at a bare prompt rather than writing the secret down.
+            return None, None
         return argv, read_cwd(kid)
     return None, None
 
@@ -556,6 +602,8 @@ def describe(client):
     elif argv:
         launch = [resolve_exe(pid, argv[0]), *argv[1:]]
 
+    if launch and not recordable(launch):
+        launch = None  # fall back to the desktop entry rather than store a secret
     if not launch:
         desktop_id = desktop_for_class(cls)
         if desktop_id:
@@ -583,21 +631,136 @@ def template_path(name):
     return os.path.join(CONFIG_DIR, slugify(name) + ".json")
 
 
+def private_dir(path, create=True):
+    """A directory descriptor for `path`, proven to be our own private directory.
+
+    Templates record command lines and working directories, so the files are
+    kept 0600 inside a 0700 directory and every open is descriptor-relative and
+    refuses to follow symlinks.
+    """
+    if create:
+        os.makedirs(path, mode=0o700, exist_ok=True)
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+            raise OSError(f"{path} is not owned by this user")
+        if info.st_mode & 0o077:
+            os.fchmod(fd, 0o700)
+    except Exception:
+        os.close(fd)
+        raise
+    return fd
+
+
 def write_json(path, data):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(data, f, indent=2)
-        f.write("\n")
-    os.replace(tmp, path)
+    directory, name = os.path.split(path)
+    dir_fd = private_dir(directory)
+    tmp = name + ".tmp"
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600, dir_fd=dir_fd)
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    finally:
+        os.close(dir_fd)
 
 
 def read_json(path):
+    directory, name = os.path.split(path)
     try:
-        with open(path) as f:
-            return json.load(f)
-    except (OSError, json.JSONDecodeError):
+        dir_fd = private_dir(directory, create=False)
+    except OSError:
         return None
+    try:
+        # O_NONBLOCK so a FIFO left in place of the file can't stall the restore.
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
+    except OSError:
+        os.close(dir_fd)
+        return None
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_size > MAX_TEMPLATE_BYTES:
+            return None
+        with os.fdopen(fd, "rb") as f:
+            fd = -1
+            raw = f.read(MAX_TEMPLATE_BYTES + 1)
+        if len(raw) > MAX_TEMPLATE_BYTES:
+            log(f"{path}: larger than {MAX_TEMPLATE_BYTES} bytes, ignored")
+            return None
+        return json.loads(raw.decode("utf-8", "strict"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        os.close(dir_fd)
+
+
+# ------------------------------------------------------------------- validation
+
+def clip(value, limit=MAX_FIELD_CHARS):
+    return value[:limit] if isinstance(value, str) else ""
+
+
+def pair(value):
+    if not isinstance(value, list) or len(value) != 2:
+        return None
+    out = []
+    for n in value:
+        if isinstance(n, bool) or not isinstance(n, (int, float)):
+            return None
+        out.append(int(n))
+    return out
+
+
+def clean_window(entry):
+    """One template window, or None when it isn't shaped like one."""
+    if not isinstance(entry, dict):
+        return None
+    argv = entry.get("launch")
+    if not isinstance(argv, list) or len(argv) > MAX_ARGV:
+        return None
+    launch = []
+    for arg in argv:
+        if not isinstance(arg, str) or len(arg) > MAX_ARG_CHARS or "\x00" in arg:
+            return None
+        launch.append(arg)
+    # A template edited by hand (or by something else) doesn't get to smuggle a
+    # credential back in, and never gets to run a shell one-liner we didn't write.
+    if launch and not recordable(launch):
+        return None
+    out = dict(entry)
+    out["launch"] = launch
+    out["class"] = clip(entry.get("class"))
+    out["initialClass"] = clip(entry.get("initialClass"))
+    out["cwd"] = clip(entry.get("cwd"))
+    out["workspace"] = clip(entry.get("workspace"), 128)
+    for field in ("at", "size"):
+        if field in out:
+            value = pair(out.get(field))
+            if value is None:
+                return None
+            out[field] = value
+    return out
+
+
+def clean_template(data, path=""):
+    """Validate a template read off disk before any of it is acted on."""
+    if not isinstance(data, dict) or not isinstance(data.get("windows"), list):
+        return None
+    windows = data["windows"]
+    if len(windows) > MAX_WINDOWS:
+        log(f"{path or 'template'}: more than {MAX_WINDOWS} windows, truncated")
+        windows = windows[:MAX_WINDOWS]
+    cleaned = [w for w in (clean_window(w) for w in windows) if w]
+    out = dict(data)
+    out["windows"] = cleaned
+    out["name"] = clip(data.get("name"), 128)
+    return out
 
 
 def all_templates():
@@ -606,17 +769,19 @@ def all_templates():
     result = []
     for name in sorted(os.listdir(CONFIG_DIR)):
         if name.endswith(".json"):
-            data = read_json(os.path.join(CONFIG_DIR, name))
-            if isinstance(data, dict) and isinstance(data.get("windows"), list):
-                data.setdefault("name", name[:-5])
-                data["_path"] = os.path.join(CONFIG_DIR, name)
+            full = os.path.join(CONFIG_DIR, name)
+            data = clean_template(read_json(full), full)
+            if data is not None:
+                if not data.get("name"):
+                    data["name"] = name[:-5]
+                data["_path"] = full
                 result.append(data)
     return result
 
 
 def load_template(name):
-    data = read_json(template_path(name))
-    if isinstance(data, dict) and str(data.get("name", "")).lower() == name.lower():
+    data = clean_template(read_json(template_path(name)), template_path(name))
+    if data is not None and str(data.get("name", "")).lower() == name.lower():
         data["_path"] = template_path(name)
         return data
     for tpl in all_templates():

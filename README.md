@@ -90,6 +90,15 @@ something else. Only a command that has been running for at least 20 seconds is
 recorded, so a snapshot doesn't capture whatever was typed a moment earlier;
 `save`/`autosave` take `--no-commands` to skip recording them altogether.
 
+A command line can carry a password or an API token as an argument, and a
+template outlives the window it came from. Any command that looks like it
+carries a credential — a `--password`/`--token` style option, a URL with a
+token or embedded login, or an argument shaped like a known key — is not
+recorded at all: that window comes back at a plain prompt, or from its
+`.desktop` entry, instead. Templates are kept as `0600` files in a `0700`
+directory, and they are read back with their size, shape and lengths checked
+before a restore acts on them.
+
 How launch commands are worked out:
 
 | Window | Relaunched with |
